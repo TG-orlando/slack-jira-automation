@@ -20,86 +20,95 @@ const JIRA_ISSUE_TYPE = process.env.JIRA_ISSUE_TYPE || 'Task';
 const processedReactions = new Set();
 
 /**
- * Create a Jira ticket
+ * Get Service Desk ID and Request Type ID for the project
  */
-async function createJiraTicket(messageData) {
-  const jiraUrl = `${process.env.JIRA_BASE_URL}/rest/api/3/issue`;
-
-  // Prepare the issue data
-  const issueData = {
-    fields: {
-      project: {
-        key: JIRA_PROJECT_KEY
-      },
-      summary: `Onboarding Request - ${new Date().toLocaleDateString()}`,
-      description: {
-        type: 'doc',
-        version: 1,
-        content: [
-          {
-            type: 'paragraph',
-            content: [
-              {
-                type: 'text',
-                text: 'Onboarding request from Slack:'
-              }
-            ]
-          },
-          {
-            type: 'paragraph',
-            content: [
-              {
-                type: 'text',
-                text: messageData.text,
-                marks: [{ type: 'strong' }]
-              }
-            ]
-          },
-          {
-            type: 'paragraph',
-            content: [
-              {
-                type: 'text',
-                text: `\nRequested by: ${messageData.userName}`
-              }
-            ]
-          },
-          {
-            type: 'paragraph',
-            content: [
-              {
-                type: 'text',
-                text: `Slack Message Link: ${messageData.messageLink}`
-              }
-            ]
-          }
-        ]
-      },
-      issuetype: {
-        name: JIRA_ISSUE_TYPE
-      }
-    }
-  };
-
-  // Add custom fields if configured
-  if (process.env.JIRA_CUSTOM_FIELDS) {
-    try {
-      const customFields = JSON.parse(process.env.JIRA_CUSTOM_FIELDS);
-      Object.assign(issueData.fields, customFields);
-    } catch (error) {
-      console.error('Error parsing JIRA_CUSTOM_FIELDS:', error);
-    }
-  }
+async function getServiceDeskInfo() {
+  const authHeader = `Basic ${Buffer.from(
+    `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
+  ).toString('base64')}`;
 
   try {
-    const response = await axios.post(jiraUrl, issueData, {
-      headers: {
-        'Authorization': `Basic ${Buffer.from(
-          `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
-        ).toString('base64')}`,
-        'Content-Type': 'application/json',
-      },
-    });
+    // Get all service desks
+    const serviceDesksResponse = await axios.get(
+      `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/servicedesk`,
+      {
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    // Find the service desk matching our project key
+    const serviceDesk = serviceDesksResponse.data.values.find(
+      sd => sd.projectKey === JIRA_PROJECT_KEY
+    );
+
+    if (!serviceDesk) {
+      throw new Error(`Service Desk not found for project ${JIRA_PROJECT_KEY}`);
+    }
+
+    // Get request types for this service desk
+    const requestTypesResponse = await axios.get(
+      `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/servicedesk/${serviceDesk.id}/requesttype`,
+      {
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    // Find the request type (look for one matching JIRA_ISSUE_TYPE or use the first one)
+    const requestType = requestTypesResponse.data.values.find(
+      rt => rt.name.toLowerCase().includes(JIRA_ISSUE_TYPE.toLowerCase())
+    ) || requestTypesResponse.data.values[0];
+
+    return {
+      serviceDeskId: serviceDesk.id,
+      requestTypeId: requestType.id
+    };
+  } catch (error) {
+    console.error('Error getting Service Desk info:', error.response?.data || error.message);
+    throw error;
+  }
+}
+
+/**
+ * Create a Jira Service Desk ticket
+ */
+async function createJiraTicket(messageData) {
+  const authHeader = `Basic ${Buffer.from(
+    `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
+  ).toString('base64')}`;
+
+  try {
+    // Get Service Desk info
+    const { serviceDeskId, requestTypeId } = await getServiceDeskInfo();
+
+    // Prepare description text
+    const description = `Onboarding request from Slack:\n\n*${messageData.text}*\n\nRequested by: ${messageData.userName}\n\nSlack Message Link: ${messageData.messageLink}`;
+
+    // Create Service Desk request
+    const requestData = {
+      serviceDeskId: serviceDeskId,
+      requestTypeId: requestTypeId,
+      requestFieldValues: {
+        summary: `Onboarding Request - ${new Date().toLocaleDateString()}`,
+        description: description
+      }
+    };
+
+    const response = await axios.post(
+      `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/request`,
+      requestData,
+      {
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
 
     return response.data;
   } catch (error) {
@@ -218,13 +227,14 @@ app.event('reaction_added', async ({ event, client, logger }) => {
     // Create Jira ticket
     const jiraTicket = await createJiraTicket(messageData);
 
-    logger.info(`Jira ticket created: ${jiraTicket.key}`);
+    const ticketKey = jiraTicket.issueKey || jiraTicket.key;
+    logger.info(`Jira ticket created: ${ticketKey}`);
 
     // Post a confirmation message in the thread
     await client.chat.postMessage({
       channel: item.channel,
       thread_ts: item.ts,
-      text: `✅ Jira ticket created: ${process.env.JIRA_BASE_URL}/browse/${jiraTicket.key}`
+      text: `✅ Jira ticket created: ${process.env.JIRA_BASE_URL}/browse/${ticketKey}`
     });
 
   } catch (error) {
