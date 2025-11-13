@@ -1,0 +1,21 @@
+{
+  "name": "slack-jira-automation",
+  "version": "1.0.0",
+  "description": "Automation to create Jira tickets from Slack reactions in eel-onboarding channel",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js"
+  },
+  "keywords": ["slack", "jira", "automation"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@slack/bolt": "^3.17.1",
+    "axios": "^1.6.5",
+    "dotenv": "^16.4.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  }
+}
