@@ -151,6 +151,14 @@ async function createJiraTicket(messageData) {
   // Get field metadata for the issue type
   const fieldMetadata = await getIssueCreateMetadata();
 
+  // Log available fields for debugging
+  console.log('Available Jira fields for', JIRA_ISSUE_TYPE, ':');
+  Object.entries(fieldMetadata).forEach(([fieldId, fieldInfo]) => {
+    if (fieldId.startsWith('customfield_')) {
+      console.log(`  ${fieldId}: ${fieldInfo.name} (${fieldInfo.schema?.type || 'unknown type'})`);
+    }
+  });
+
   // Parse Rippling message if it looks like a Rippling notification
   let customFields = {};
   if (messageData.text.includes('New Hire:') || messageData.text.includes('Start Date:')) {
@@ -207,6 +215,38 @@ async function createJiraTicket(messageData) {
     console.error('Status:', error.response?.status);
     console.error('Error Messages:', JSON.stringify(error.response?.data?.errorMessages, null, 2));
     console.error('Field Errors:', JSON.stringify(error.response?.data?.errors, null, 2));
+
+    // If "New Hire Onboarding" fails, fallback to "Task" type
+    if (JIRA_ISSUE_TYPE === 'New Hire Onboarding' && error.response?.status === 400) {
+      console.log('Retrying with "Task" issue type as fallback...');
+
+      const fallbackIssueData = {
+        fields: {
+          project: { key: JIRA_PROJECT_KEY },
+          summary: issueData.fields.summary,
+          description: description,
+          issuetype: { name: 'Task' }
+        }
+      };
+
+      try {
+        const fallbackResponse = await axios.post(jiraUrl, fallbackIssueData, {
+          headers: {
+            'Authorization': `Basic ${Buffer.from(
+              `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
+            ).toString('base64')}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        console.log('Successfully created ticket as "Task" type');
+        return fallbackResponse.data;
+      } catch (fallbackError) {
+        console.error('Fallback also failed:', fallbackError.response?.data || fallbackError.message);
+        throw fallbackError;
+      }
+    }
+
     throw error;
   }
 }
