@@ -154,9 +154,7 @@ async function createJiraTicket(messageData) {
   // Log available fields for debugging
   console.log('Available Jira fields for', JIRA_ISSUE_TYPE, ':');
   Object.entries(fieldMetadata).forEach(([fieldId, fieldInfo]) => {
-    if (fieldId.startsWith('customfield_')) {
-      console.log(`  ${fieldId}: ${fieldInfo.name} (${fieldInfo.schema?.type || 'unknown type'})`);
-    }
+    console.log(`  ${fieldId}: ${fieldInfo.name} (${fieldInfo.schema?.type || 'unknown type'})`);
   });
 
   // Parse Rippling message if it looks like a Rippling notification
@@ -220,6 +218,39 @@ async function createJiraTicket(messageData) {
     if (JIRA_ISSUE_TYPE === 'New Hire Onboarding' && error.response?.status === 400) {
       console.log('Retrying with "Task" issue type as fallback...');
 
+      // Get field metadata for Task type to find Request Type field
+      const taskMetadataUrl = `${process.env.JIRA_BASE_URL}/rest/api/2/issue/createmeta?projectKeys=${JIRA_PROJECT_KEY}&issuetypeNames=Task&expand=projects.issuetypes.fields`;
+
+      let requestTypeField = null;
+      try {
+        const metaResponse = await axios.get(taskMetadataUrl, {
+          headers: {
+            'Authorization': `Basic ${Buffer.from(
+              `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
+            ).toString('base64')}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        const taskFields = metaResponse.data.projects?.[0]?.issuetypes?.[0]?.fields || {};
+
+        console.log('Available fields for Task type:');
+        Object.entries(taskFields).forEach(([fieldId, fieldInfo]) => {
+          console.log(`  ${fieldId}: ${fieldInfo.name} (${fieldInfo.schema?.type || 'unknown type'})`);
+
+          // Look for Request Type field
+          if (fieldInfo.name.toLowerCase().includes('request type')) {
+            requestTypeField = {
+              id: fieldId,
+              info: fieldInfo
+            };
+            console.log(`  *** Found Request Type field: ${fieldId}`);
+          }
+        });
+      } catch (metaError) {
+        console.error('Error fetching Task metadata:', metaError.message);
+      }
+
       const fallbackIssueData = {
         fields: {
           project: { key: JIRA_PROJECT_KEY },
@@ -228,6 +259,30 @@ async function createJiraTicket(messageData) {
           issuetype: { name: 'Task' }
         }
       };
+
+      // Try to add Request Type field if found
+      if (requestTypeField) {
+        console.log('Attempting to set Request Type to "New Hire Onboarding"...');
+
+        // Check if it's a select field with allowed values
+        if (requestTypeField.info.allowedValues) {
+          const newHireOption = requestTypeField.info.allowedValues.find(
+            v => v.value && v.value.toLowerCase().includes('new hire onboarding')
+          );
+
+          if (newHireOption) {
+            console.log(`Found matching Request Type value: ${newHireOption.value}`);
+            fallbackIssueData.fields[requestTypeField.id] = { value: newHireOption.value };
+          } else {
+            console.log('Available Request Type values:', requestTypeField.info.allowedValues.map(v => v.value || v.name).join(', '));
+          }
+        } else {
+          // Try setting it as a plain string or ID
+          fallbackIssueData.fields[requestTypeField.id] = 'New Hire Onboarding';
+        }
+      }
+
+      console.log('Fallback issue data:', JSON.stringify(fallbackIssueData, null, 2));
 
       try {
         const fallbackResponse = await axios.post(jiraUrl, fallbackIssueData, {
@@ -240,6 +295,9 @@ async function createJiraTicket(messageData) {
         });
 
         console.log('Successfully created ticket as "Task" type');
+        if (requestTypeField) {
+          console.log('Request Type field was set!');
+        }
         return fallbackResponse.data;
       } catch (fallbackError) {
         console.error('Fallback also failed:', fallbackError.response?.data || fallbackError.message);
