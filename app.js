@@ -20,6 +20,126 @@ const JIRA_ISSUE_TYPE = process.env.JIRA_ISSUE_TYPE || 'Task';
 const processedReactions = new Set();
 
 /**
+ * Get field metadata for creating an issue
+ */
+async function getIssueCreateMetadata() {
+  const metadataUrl = `${process.env.JIRA_BASE_URL}/rest/api/2/issue/createmeta?projectKeys=${JIRA_PROJECT_KEY}&issuetypeNames=${encodeURIComponent(JIRA_ISSUE_TYPE)}&expand=projects.issuetypes.fields`;
+
+  try {
+    const response = await axios.get(metadataUrl, {
+      headers: {
+        'Authorization': `Basic ${Buffer.from(
+          `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
+        ).toString('base64')}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const project = response.data.projects?.[0];
+    const issueType = project?.issuetypes?.[0];
+    const fields = issueType?.fields || {};
+
+    return fields;
+  } catch (error) {
+    console.error('Error fetching issue metadata:', error.response?.data || error.message);
+    return {};
+  }
+}
+
+/**
+ * Parse Rippling message to extract employee details
+ */
+function parseRipplingMessage(text) {
+  const details = {};
+
+  // Common patterns in Rippling messages
+  const patterns = {
+    name: /New Hire:\s*(.+?)(?:\n|$)/i,
+    preferredName: /Preferred Name:\s*(.+?)(?:\n|$)/i,
+    startDate: /Start Date:\s*(.+?)(?:\n|$)/i,
+    title: /Title:\s*(.+?)(?:\n|$)/i,
+    department: /Department:\s*(.+?)(?:\n|$)/i,
+    manager: /Manager:\s*(.+?)(?:\n|$)/i,
+    employmentType: /Employment Type:\s*(.+?)(?:\n|$)/i,
+    workLocation: /Work Location:\s*(.+?)(?:\n|$)/i,
+    email: /Email:\s*(.+?)(?:\n|$)/i,
+  };
+
+  for (const [key, pattern] of Object.entries(patterns)) {
+    const match = text.match(pattern);
+    if (match) {
+      details[key] = match[1].trim();
+    }
+  }
+
+  return details;
+}
+
+/**
+ * Map parsed employee details to Jira custom fields
+ */
+function mapDetailsToJiraFields(details, fieldMetadata) {
+  const mappedFields = {};
+
+  // Common field name mappings to look for in Jira
+  const fieldMappings = {
+    name: ['Name', 'Employee Name', 'Full Name'],
+    startDate: ['Start Date', 'Start date', 'Employment Start Date'],
+    email: ['Email', 'Email Address'],
+    department: ['Department'],
+    manager: ['Manager', 'Manager Information'],
+    employmentType: ['Employment Type'],
+  };
+
+  // Find matching custom fields by name
+  for (const [detailKey, value] of Object.entries(details)) {
+    if (!value) continue;
+
+    const possibleNames = fieldMappings[detailKey] || [detailKey];
+
+    for (const [fieldId, fieldInfo] of Object.entries(fieldMetadata)) {
+      const fieldName = fieldInfo.name;
+
+      if (possibleNames.some(name => fieldName.toLowerCase().includes(name.toLowerCase()))) {
+        // Handle different field types
+        if (fieldInfo.schema?.type === 'date') {
+          // Try to parse and format date
+          mappedFields[fieldId] = formatDateForJira(value);
+        } else if (fieldInfo.schema?.type === 'user') {
+          // For user fields, we'd need to look up the user - skip for now
+          continue;
+        } else {
+          // Plain text field
+          mappedFields[fieldId] = value;
+        }
+        break;
+      }
+    }
+  }
+
+  return mappedFields;
+}
+
+/**
+ * Format date string to Jira format (YYYY-MM-DD)
+ */
+function formatDateForJira(dateString) {
+  try {
+    // Handle common formats like "12/1/25", "12/01/2025", etc.
+    const date = new Date(dateString);
+    if (!isNaN(date.getTime())) {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+  } catch (error) {
+    console.error('Error parsing date:', error);
+  }
+  return dateString; // Return original if parsing fails
+}
+
+/**
  * Create a Jira ticket using standard API
  */
 async function createJiraTicket(messageData) {
@@ -28,29 +148,48 @@ async function createJiraTicket(messageData) {
   // Prepare description text (v2 API uses simple text, not ADF)
   const description = `Onboarding request from Slack:\n\n${messageData.text}\n\nRequested by: ${messageData.userName}\n\nSlack Message Link: ${messageData.messageLink}`;
 
+  // Get field metadata for the issue type
+  const fieldMetadata = await getIssueCreateMetadata();
+
+  // Parse Rippling message if it looks like a Rippling notification
+  let customFields = {};
+  if (messageData.text.includes('New Hire:') || messageData.text.includes('Start Date:')) {
+    console.log('Detected Rippling message, parsing employee details...');
+    const parsedDetails = parseRipplingMessage(messageData.text);
+    console.log('Parsed details:', JSON.stringify(parsedDetails, null, 2));
+
+    customFields = mapDetailsToJiraFields(parsedDetails, fieldMetadata);
+    console.log('Mapped to Jira fields:', JSON.stringify(customFields, null, 2));
+  }
+
   // Prepare the issue data
   const issueData = {
     fields: {
       project: {
         key: JIRA_PROJECT_KEY
       },
-      summary: `Onboarding Request - ${new Date().toLocaleDateString()}`,
+      summary: customFields.name
+        ? `Onboarding: ${customFields.name}`
+        : `Onboarding Request - ${new Date().toLocaleDateString()}`,
       description: description,
       issuetype: {
         name: JIRA_ISSUE_TYPE
-      }
+      },
+      ...customFields
     }
   };
 
-  // Add custom fields if configured
+  // Add custom fields from environment if configured
   if (process.env.JIRA_CUSTOM_FIELDS) {
     try {
-      const customFields = JSON.parse(process.env.JIRA_CUSTOM_FIELDS);
-      Object.assign(issueData.fields, customFields);
+      const envCustomFields = JSON.parse(process.env.JIRA_CUSTOM_FIELDS);
+      Object.assign(issueData.fields, envCustomFields);
     } catch (error) {
       console.error('Error parsing JIRA_CUSTOM_FIELDS:', error);
     }
   }
+
+  console.log('Creating Jira ticket with fields:', JSON.stringify(issueData, null, 2));
 
   try {
     const response = await axios.post(jiraUrl, issueData, {
