@@ -64,7 +64,10 @@ async function createJiraTicket(messageData) {
 
     return response.data;
   } catch (error) {
-    console.error('Error creating Jira ticket:', error.response?.data || error.message);
+    console.error('Error creating Jira ticket:');
+    console.error('Status:', error.response?.status);
+    console.error('Error Messages:', JSON.stringify(error.response?.data?.errorMessages, null, 2));
+    console.error('Field Errors:', JSON.stringify(error.response?.data?.errors, null, 2));
     throw error;
   }
 }
