@@ -115,6 +115,64 @@ async function getMessageLink(client, channelId, messageTs) {
   }
 }
 
+/**
+ * Extract full text content from a Slack message, including blocks and attachments
+ */
+function extractMessageText(message) {
+  let fullText = '';
+
+  // Get main text field
+  if (message.text) {
+    fullText += message.text;
+  }
+
+  // Extract text from blocks (used by apps like Rippling)
+  if (message.blocks && message.blocks.length > 0) {
+    const blockTexts = message.blocks.map(block => {
+      if (block.type === 'section' && block.text) {
+        return block.text.text;
+      } else if (block.type === 'rich_text' && block.elements) {
+        // Handle rich text blocks
+        return block.elements.map(element => {
+          if (element.elements) {
+            return element.elements.map(e => e.text || '').join('');
+          }
+          return '';
+        }).join('\n');
+      }
+      return '';
+    }).filter(text => text.length > 0);
+
+    if (blockTexts.length > 0) {
+      if (fullText) fullText += '\n\n';
+      fullText += blockTexts.join('\n\n');
+    }
+  }
+
+  // Extract text from attachments
+  if (message.attachments && message.attachments.length > 0) {
+    const attachmentTexts = message.attachments.map(att => {
+      let attText = '';
+      if (att.pretext) attText += att.pretext + '\n';
+      if (att.text) attText += att.text + '\n';
+      if (att.fields) {
+        att.fields.forEach(field => {
+          if (field.title) attText += `*${field.title}*\n`;
+          if (field.value) attText += `${field.value}\n`;
+        });
+      }
+      return attText.trim();
+    }).filter(text => text.length > 0);
+
+    if (attachmentTexts.length > 0) {
+      if (fullText) fullText += '\n\n';
+      fullText += attachmentTexts.join('\n\n');
+    }
+  }
+
+  return fullText || 'No message content available';
+}
+
 // Listen for reaction_added events
 app.event('reaction_added', async ({ event, client, logger }) => {
   try {
@@ -165,9 +223,12 @@ app.event('reaction_added', async ({ event, client, logger }) => {
     const userName = await getUserName(client, message.user);
     const messageLink = await getMessageLink(client, item.channel, item.ts);
 
+    // Extract full message text including blocks and attachments
+    const fullMessageText = extractMessageText(message);
+
     // Prepare message data for Jira
     const messageData = {
-      text: message.text,
+      text: fullMessageText,
       userName: userName,
       userEmail: message.user, // You might want to get actual email
       messageLink: messageLink,
