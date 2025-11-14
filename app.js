@@ -20,95 +20,47 @@ const JIRA_ISSUE_TYPE = process.env.JIRA_ISSUE_TYPE || 'Task';
 const processedReactions = new Set();
 
 /**
- * Get Service Desk ID and Request Type ID for the project
- */
-async function getServiceDeskInfo() {
-  const authHeader = `Basic ${Buffer.from(
-    `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
-  ).toString('base64')}`;
-
-  try {
-    // Get all service desks
-    const serviceDesksResponse = await axios.get(
-      `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/servicedesk`,
-      {
-        headers: {
-          'Authorization': authHeader,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    // Find the service desk matching our project key
-    const serviceDesk = serviceDesksResponse.data.values.find(
-      sd => sd.projectKey === JIRA_PROJECT_KEY
-    );
-
-    if (!serviceDesk) {
-      throw new Error(`Service Desk not found for project ${JIRA_PROJECT_KEY}`);
-    }
-
-    // Get request types for this service desk
-    const requestTypesResponse = await axios.get(
-      `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/servicedesk/${serviceDesk.id}/requesttype`,
-      {
-        headers: {
-          'Authorization': authHeader,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    // Find the request type (look for one matching JIRA_ISSUE_TYPE or use the first one)
-    const requestType = requestTypesResponse.data.values.find(
-      rt => rt.name.toLowerCase().includes(JIRA_ISSUE_TYPE.toLowerCase())
-    ) || requestTypesResponse.data.values[0];
-
-    return {
-      serviceDeskId: serviceDesk.id,
-      requestTypeId: requestType.id
-    };
-  } catch (error) {
-    console.error('Error getting Service Desk info:', error.response?.data || error.message);
-    throw error;
-  }
-}
-
-/**
- * Create a Jira Service Desk ticket
+ * Create a Jira ticket using standard API
  */
 async function createJiraTicket(messageData) {
-  const authHeader = `Basic ${Buffer.from(
-    `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
-  ).toString('base64')}`;
+  const jiraUrl = `${process.env.JIRA_BASE_URL}/rest/api/2/issue`;
+
+  // Prepare description text (v2 API uses simple text, not ADF)
+  const description = `Onboarding request from Slack:\n\n${messageData.text}\n\nRequested by: ${messageData.userName}\n\nSlack Message Link: ${messageData.messageLink}`;
+
+  // Prepare the issue data
+  const issueData = {
+    fields: {
+      project: {
+        key: JIRA_PROJECT_KEY
+      },
+      summary: `Onboarding Request - ${new Date().toLocaleDateString()}`,
+      description: description,
+      issuetype: {
+        name: JIRA_ISSUE_TYPE
+      }
+    }
+  };
+
+  // Add custom fields if configured
+  if (process.env.JIRA_CUSTOM_FIELDS) {
+    try {
+      const customFields = JSON.parse(process.env.JIRA_CUSTOM_FIELDS);
+      Object.assign(issueData.fields, customFields);
+    } catch (error) {
+      console.error('Error parsing JIRA_CUSTOM_FIELDS:', error);
+    }
+  }
 
   try {
-    // Get Service Desk info
-    const { serviceDeskId, requestTypeId } = await getServiceDeskInfo();
-
-    // Prepare description text
-    const description = `Onboarding request from Slack:\n\n*${messageData.text}*\n\nRequested by: ${messageData.userName}\n\nSlack Message Link: ${messageData.messageLink}`;
-
-    // Create Service Desk request
-    const requestData = {
-      serviceDeskId: serviceDeskId,
-      requestTypeId: requestTypeId,
-      requestFieldValues: {
-        summary: `Onboarding Request - ${new Date().toLocaleDateString()}`,
-        description: description
-      }
-    };
-
-    const response = await axios.post(
-      `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/request`,
-      requestData,
-      {
-        headers: {
-          'Authorization': authHeader,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    const response = await axios.post(jiraUrl, issueData, {
+      headers: {
+        'Authorization': `Basic ${Buffer.from(
+          `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
+        ).toString('base64')}`,
+        'Content-Type': 'application/json',
+      },
+    });
 
     return response.data;
   } catch (error) {
