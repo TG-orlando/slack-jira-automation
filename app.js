@@ -268,22 +268,42 @@ async function createJiraTicket(messageData) {
           requestFieldValues[field.fieldId] = parsedDetails.name
             ? `Onboarding: ${parsedDetails.name}`
             : `Onboarding Request - ${new Date().toLocaleDateString()}`;
+        } else if (fieldName.includes('priority')) {
+          // Set default priority to "Low" or the first available option
+          requestFieldValues[field.fieldId] = { name: 'Low' };
         } else if (fieldName.includes('name') && !fieldName.includes('manager')) {
-          requestFieldValues[field.fieldId] = parsedDetails.name || '';
+          if (parsedDetails.name) {
+            requestFieldValues[field.fieldId] = parsedDetails.name;
+          }
         } else if (fieldName.includes('start date')) {
-          requestFieldValues[field.fieldId] = parsedDetails.startDate || '';
+          if (parsedDetails.startDate) {
+            // Format date to yyyy-MM-dd
+            requestFieldValues[field.fieldId] = formatDateForJira(parsedDetails.startDate);
+          }
         } else if (fieldName.includes('email')) {
-          requestFieldValues[field.fieldId] = parsedDetails.email || '';
+          if (parsedDetails.email) {
+            requestFieldValues[field.fieldId] = parsedDetails.email;
+          }
         } else if (fieldName.includes('department')) {
-          requestFieldValues[field.fieldId] = parsedDetails.department || '';
+          if (parsedDetails.department) {
+            requestFieldValues[field.fieldId] = parsedDetails.department;
+          }
         } else if (fieldName.includes('manager')) {
-          requestFieldValues[field.fieldId] = parsedDetails.manager || '';
+          if (parsedDetails.manager) {
+            requestFieldValues[field.fieldId] = parsedDetails.manager;
+          }
         } else if (fieldName.includes('title') || fieldName.includes('position')) {
-          requestFieldValues[field.fieldId] = parsedDetails.title || '';
+          if (parsedDetails.title) {
+            requestFieldValues[field.fieldId] = parsedDetails.title;
+          }
         } else if (fieldName.includes('employment type')) {
-          requestFieldValues[field.fieldId] = parsedDetails.employmentType || '';
+          if (parsedDetails.employmentType) {
+            requestFieldValues[field.fieldId] = parsedDetails.employmentType;
+          }
         } else if (fieldName.includes('location')) {
-          requestFieldValues[field.fieldId] = parsedDetails.workLocation || '';
+          if (parsedDetails.workLocation) {
+            requestFieldValues[field.fieldId] = parsedDetails.workLocation;
+          }
         } else if (fieldName.includes('description') || fieldName.includes('details')) {
           // Only add description if the field exists
           requestFieldValues[field.fieldId] = description;
