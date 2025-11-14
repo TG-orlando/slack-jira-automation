@@ -20,6 +20,82 @@ const JIRA_ISSUE_TYPE = process.env.JIRA_ISSUE_TYPE || 'Task';
 const processedReactions = new Set();
 
 /**
+ * Get Service Desk and Request Type IDs
+ */
+async function getServiceDeskRequestType() {
+  const authHeader = `Basic ${Buffer.from(
+    `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
+  ).toString('base64')}`;
+
+  try {
+    // Get all service desks
+    console.log('Fetching service desks...');
+    const serviceDesksResponse = await axios.get(
+      `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/servicedesk`,
+      {
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    console.log('Service desks found:', serviceDesksResponse.data.values?.length || 0);
+
+    // Find the service desk matching our project key
+    const serviceDesk = serviceDesksResponse.data.values?.find(
+      sd => sd.projectKey === JIRA_PROJECT_KEY
+    );
+
+    if (!serviceDesk) {
+      console.error(`No Service Desk found for project ${JIRA_PROJECT_KEY}`);
+      return null;
+    }
+
+    console.log(`Found Service Desk: ${serviceDesk.projectName} (ID: ${serviceDesk.id})`);
+
+    // Get request types for this service desk
+    console.log('Fetching request types...');
+    const requestTypesResponse = await axios.get(
+      `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/servicedesk/${serviceDesk.id}/requesttype`,
+      {
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    console.log('Request types available:');
+    requestTypesResponse.data.values?.forEach(rt => {
+      console.log(`  - ${rt.name} (ID: ${rt.id})`);
+    });
+
+    // Find "New Hire Onboarding" request type
+    const requestType = requestTypesResponse.data.values?.find(
+      rt => rt.name.toLowerCase().includes('new hire onboarding')
+    );
+
+    if (requestType) {
+      console.log(`Found matching request type: ${requestType.name} (ID: ${requestType.id})`);
+      return {
+        serviceDeskId: serviceDesk.id,
+        requestTypeId: requestType.id,
+        requestTypeName: requestType.name
+      };
+    }
+
+    console.error('New Hire Onboarding request type not found');
+    return null;
+  } catch (error) {
+    console.error('Error fetching Service Desk info:');
+    console.error('Status:', error.response?.status);
+    console.error('Error:', error.response?.data || error.message);
+    return null;
+  }
+}
+
+/**
  * Get field metadata for creating an issue
  */
 async function getIssueCreateMetadata() {
@@ -140,13 +216,67 @@ function formatDateForJira(dateString) {
 }
 
 /**
- * Create a Jira ticket using standard API
+ * Create a Jira ticket using standard API or Service Desk API
  */
 async function createJiraTicket(messageData) {
-  const jiraUrl = `${process.env.JIRA_BASE_URL}/rest/api/2/issue`;
+  const authHeader = `Basic ${Buffer.from(
+    `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
+  ).toString('base64')}`;
 
-  // Prepare description text (v2 API uses simple text, not ADF)
+  // Prepare description text
   const description = `Onboarding request from Slack:\n\n${messageData.text}\n\nRequested by: ${messageData.userName}\n\nSlack Message Link: ${messageData.messageLink}`;
+
+  // Try Service Desk API first if using "New Hire Onboarding"
+  if (JIRA_ISSUE_TYPE === 'New Hire Onboarding') {
+    console.log('Attempting to use Service Desk API...');
+    const serviceDeskInfo = await getServiceDeskRequestType();
+
+    if (serviceDeskInfo) {
+      // Parse employee details
+      const parsedDetails = parseRipplingMessage(messageData.text);
+      console.log('Parsed employee details:', JSON.stringify(parsedDetails, null, 2));
+
+      // Create Service Desk request
+      const requestData = {
+        serviceDeskId: serviceDeskInfo.serviceDeskId,
+        requestTypeId: serviceDeskInfo.requestTypeId,
+        requestFieldValues: {
+          summary: parsedDetails.name
+            ? `Onboarding: ${parsedDetails.name}`
+            : `Onboarding Request - ${new Date().toLocaleDateString()}`,
+          description: description
+        }
+      };
+
+      console.log('Creating Service Desk request:', JSON.stringify(requestData, null, 2));
+
+      try {
+        const response = await axios.post(
+          `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/request`,
+          requestData,
+          {
+            headers: {
+              'Authorization': authHeader,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+
+        console.log('Successfully created Service Desk request!');
+        return response.data;
+      } catch (sdError) {
+        console.error('Service Desk API failed:');
+        console.error('Status:', sdError.response?.status);
+        console.error('Error:', JSON.stringify(sdError.response?.data, null, 2));
+        console.log('Falling back to regular Jira API with Task type...');
+      }
+    } else {
+      console.log('Could not get Service Desk info, falling back to Task type...');
+    }
+  }
+
+  // Fallback: Use regular Jira API with Task type
+  const jiraUrl = `${process.env.JIRA_BASE_URL}/rest/api/2/issue`;
 
   // Get field metadata for the issue type
   const fieldMetadata = await getIssueCreateMetadata();
@@ -195,116 +325,23 @@ async function createJiraTicket(messageData) {
     }
   }
 
-  console.log('Creating Jira ticket with fields:', JSON.stringify(issueData, null, 2));
+  console.log('Creating Jira ticket with fields (Task type):', JSON.stringify(issueData, null, 2));
 
   try {
     const response = await axios.post(jiraUrl, issueData, {
       headers: {
-        'Authorization': `Basic ${Buffer.from(
-          `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
-        ).toString('base64')}`,
+        'Authorization': authHeader,
         'Content-Type': 'application/json',
       },
     });
 
+    console.log('Successfully created ticket as Task type');
     return response.data;
   } catch (error) {
-    console.error('Error creating Jira ticket:');
+    console.error('Error creating Jira ticket with Task type:');
     console.error('Status:', error.response?.status);
     console.error('Error Messages:', JSON.stringify(error.response?.data?.errorMessages, null, 2));
     console.error('Field Errors:', JSON.stringify(error.response?.data?.errors, null, 2));
-
-    // If "New Hire Onboarding" fails, fallback to "Task" type
-    if (JIRA_ISSUE_TYPE === 'New Hire Onboarding' && error.response?.status === 400) {
-      console.log('Retrying with "Task" issue type as fallback...');
-
-      // Get field metadata for Task type to find Request Type field
-      const taskMetadataUrl = `${process.env.JIRA_BASE_URL}/rest/api/2/issue/createmeta?projectKeys=${JIRA_PROJECT_KEY}&issuetypeNames=Task&expand=projects.issuetypes.fields`;
-
-      let requestTypeField = null;
-      try {
-        const metaResponse = await axios.get(taskMetadataUrl, {
-          headers: {
-            'Authorization': `Basic ${Buffer.from(
-              `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
-            ).toString('base64')}`,
-            'Content-Type': 'application/json',
-          },
-        });
-
-        const taskFields = metaResponse.data.projects?.[0]?.issuetypes?.[0]?.fields || {};
-
-        console.log('Available fields for Task type:');
-        Object.entries(taskFields).forEach(([fieldId, fieldInfo]) => {
-          console.log(`  ${fieldId}: ${fieldInfo.name} (${fieldInfo.schema?.type || 'unknown type'})`);
-
-          // Look for Request Type field
-          if (fieldInfo.name.toLowerCase().includes('request type')) {
-            requestTypeField = {
-              id: fieldId,
-              info: fieldInfo
-            };
-            console.log(`  *** Found Request Type field: ${fieldId}`);
-          }
-        });
-      } catch (metaError) {
-        console.error('Error fetching Task metadata:', metaError.message);
-      }
-
-      const fallbackIssueData = {
-        fields: {
-          project: { key: JIRA_PROJECT_KEY },
-          summary: issueData.fields.summary,
-          description: description,
-          issuetype: { name: 'Task' }
-        }
-      };
-
-      // Try to add Request Type field if found
-      if (requestTypeField) {
-        console.log('Attempting to set Request Type to "New Hire Onboarding"...');
-
-        // Check if it's a select field with allowed values
-        if (requestTypeField.info.allowedValues) {
-          const newHireOption = requestTypeField.info.allowedValues.find(
-            v => v.value && v.value.toLowerCase().includes('new hire onboarding')
-          );
-
-          if (newHireOption) {
-            console.log(`Found matching Request Type value: ${newHireOption.value}`);
-            fallbackIssueData.fields[requestTypeField.id] = { value: newHireOption.value };
-          } else {
-            console.log('Available Request Type values:', requestTypeField.info.allowedValues.map(v => v.value || v.name).join(', '));
-          }
-        } else {
-          // Try setting it as a plain string or ID
-          fallbackIssueData.fields[requestTypeField.id] = 'New Hire Onboarding';
-        }
-      }
-
-      console.log('Fallback issue data:', JSON.stringify(fallbackIssueData, null, 2));
-
-      try {
-        const fallbackResponse = await axios.post(jiraUrl, fallbackIssueData, {
-          headers: {
-            'Authorization': `Basic ${Buffer.from(
-              `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
-            ).toString('base64')}`,
-            'Content-Type': 'application/json',
-          },
-        });
-
-        console.log('Successfully created ticket as "Task" type');
-        if (requestTypeField) {
-          console.log('Request Type field was set!');
-        }
-        return fallbackResponse.data;
-      } catch (fallbackError) {
-        console.error('Fallback also failed:', fallbackError.response?.data || fallbackError.message);
-        throw fallbackError;
-      }
-    }
-
     throw error;
   }
 }
