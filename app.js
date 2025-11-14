@@ -78,10 +78,30 @@ async function getServiceDeskRequestType() {
 
     if (requestType) {
       console.log(`Found matching request type: ${requestType.name} (ID: ${requestType.id})`);
+
+      // Get fields for this request type
+      console.log('Fetching fields for request type...');
+      const fieldsResponse = await axios.get(
+        `${process.env.JIRA_BASE_URL}/rest/servicedeskapi/servicedesk/${serviceDesk.id}/requesttype/${requestType.id}/field`,
+        {
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      console.log('Available fields for New Hire Onboarding:');
+      const requestTypeFields = fieldsResponse.data.requestTypeFields || [];
+      requestTypeFields.forEach(field => {
+        console.log(`  - ${field.fieldId}: ${field.name} (required: ${field.required})`);
+      });
+
       return {
         serviceDeskId: serviceDesk.id,
         requestTypeId: requestType.id,
-        requestTypeName: requestType.name
+        requestTypeName: requestType.name,
+        fields: requestTypeFields
       };
     }
 
@@ -236,16 +256,51 @@ async function createJiraTicket(messageData) {
       const parsedDetails = parseRipplingMessage(messageData.text);
       console.log('Parsed employee details:', JSON.stringify(parsedDetails, null, 2));
 
+      // Map parsed details to Service Desk fields
+      const requestFieldValues = {};
+      const fields = serviceDeskInfo.fields || [];
+
+      // Map employee details to fields
+      fields.forEach(field => {
+        const fieldName = field.name.toLowerCase();
+
+        if (fieldName.includes('summary')) {
+          requestFieldValues[field.fieldId] = parsedDetails.name
+            ? `Onboarding: ${parsedDetails.name}`
+            : `Onboarding Request - ${new Date().toLocaleDateString()}`;
+        } else if (fieldName.includes('name') && !fieldName.includes('manager')) {
+          requestFieldValues[field.fieldId] = parsedDetails.name || '';
+        } else if (fieldName.includes('start date')) {
+          requestFieldValues[field.fieldId] = parsedDetails.startDate || '';
+        } else if (fieldName.includes('email')) {
+          requestFieldValues[field.fieldId] = parsedDetails.email || '';
+        } else if (fieldName.includes('department')) {
+          requestFieldValues[field.fieldId] = parsedDetails.department || '';
+        } else if (fieldName.includes('manager')) {
+          requestFieldValues[field.fieldId] = parsedDetails.manager || '';
+        } else if (fieldName.includes('title') || fieldName.includes('position')) {
+          requestFieldValues[field.fieldId] = parsedDetails.title || '';
+        } else if (fieldName.includes('employment type')) {
+          requestFieldValues[field.fieldId] = parsedDetails.employmentType || '';
+        } else if (fieldName.includes('location')) {
+          requestFieldValues[field.fieldId] = parsedDetails.workLocation || '';
+        } else if (fieldName.includes('description') || fieldName.includes('details')) {
+          // Only add description if the field exists
+          requestFieldValues[field.fieldId] = description;
+        }
+      });
+
+      // Add Slack link to summary or a custom field if available
+      const summaryField = fields.find(f => f.name.toLowerCase().includes('summary'));
+      if (summaryField && requestFieldValues[summaryField.fieldId]) {
+        requestFieldValues[summaryField.fieldId] += `\n\nSlack Message: ${messageData.messageLink}`;
+      }
+
       // Create Service Desk request
       const requestData = {
         serviceDeskId: serviceDeskInfo.serviceDeskId,
         requestTypeId: serviceDeskInfo.requestTypeId,
-        requestFieldValues: {
-          summary: parsedDetails.name
-            ? `Onboarding: ${parsedDetails.name}`
-            : `Onboarding Request - ${new Date().toLocaleDateString()}`,
-          description: description
-        }
+        requestFieldValues: requestFieldValues
       };
 
       console.log('Creating Service Desk request:', JSON.stringify(requestData, null, 2));
