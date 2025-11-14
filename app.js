@@ -310,11 +310,8 @@ async function createJiraTicket(messageData) {
         }
       });
 
-      // Add Slack link to summary or a custom field if available
-      const summaryField = fields.find(f => f.name.toLowerCase().includes('summary'));
-      if (summaryField && requestFieldValues[summaryField.fieldId]) {
-        requestFieldValues[summaryField.fieldId] += `\n\nSlack Message: ${messageData.messageLink}`;
-      }
+      // Don't add Slack link to summary - keep it single line
+      // The summary field in Service Desk doesn't support newlines
 
       // Create Service Desk request
       const requestData = {
