@@ -265,9 +265,19 @@ async function createJiraTicket(messageData) {
         const fieldName = field.name.toLowerCase();
 
         if (fieldName.includes('summary')) {
-          requestFieldValues[field.fieldId] = parsedDetails.name
-            ? `Onboarding: ${parsedDetails.name}`
-            : `Onboarding Request - ${new Date().toLocaleDateString()}`;
+          // Build summary with name and start date
+          let summary = 'Onboarding';
+          if (parsedDetails.name) {
+            summary += `: ${parsedDetails.name}`;
+          }
+          if (parsedDetails.startDate) {
+            summary += ` - Start Date: ${parsedDetails.startDate}`;
+          }
+          // If no details available, use default
+          if (!parsedDetails.name && !parsedDetails.startDate) {
+            summary = `Onboarding Request - ${new Date().toLocaleDateString()}`;
+          }
+          requestFieldValues[field.fieldId] = summary;
         } else if (fieldName.includes('priority')) {
           // Set default priority to "Low" or the first available option
           requestFieldValues[field.fieldId] = { name: 'Low' };
